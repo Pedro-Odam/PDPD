@@ -1,87 +1,59 @@
-import numpy.matlib
-from numpy import linalg as LA
 import pandas as pd
 import numpy as np
 
-def AlgoritmoDecomposicao(Y, k, alfas, mascaras):
-    max_iteracoes = 2000    
-    tolx = 1e-4   
-    epsilon = np.finfo(float).eps
-    sqrt_eps = np.sqrt(epsilon)
-    variancia = 0.01 
-    
-    (n_medicamentos, n_virus) = Y.shape
-       
-    P0 = np.random.uniform(0, np.sqrt(variancia), (n_medicamentos, k))
-    Q0 = np.random.uniform(0, np.sqrt(variancia), (k, n_virus)) 
-    
-    Q0 = np.divide(Q0, np.matlib.tile(np.array([np.sqrt(np.sum(np.power(Q0, 2), 1))]).transpose(), (1, n_virus)))
-    
-    J = list()
-    for iteracao in range(max_iteracoes):
-        numerador = 0
-        denominador = 0
-        
-        for fase in mascaras.keys():
-            numerador += alfas[fase] * np.multiply(mascaras[fase], Y)
-            denominador += alfas[fase] * np.multiply(mascaras[fase], np.dot(P0, Q0))
-            
-        numerador = np.dot(numerador, Q0.transpose())
-        denominador = np.dot(denominador, Q0.transpose()) + np.spacing(numerador)
-        
-        P = np.maximum(0, np.multiply(P0, np.divide(numerador, denominador)))
-        P.clip(min=0)
+# Carregar o arquivo CSV.
+df = pd.read_csv("DrugVirus (1).csv", encoding="Windows-1252")
 
-        numerador = 0
-        denominador = 0
-        
-        for fase in mascaras.keys():
-            numerador += alfas[fase] * np.multiply(mascaras[fase], Y)
-            denominador += alfas[fase] * np.multiply(mascaras[fase], np.dot(P, Q0))
-            
-        numerador = np.dot(P.transpose(), numerador)
-        denominador = np.dot(P.transpose(), denominador) + np.spacing(numerador)
-        
-        Q = np.maximum(0, np.multiply(Q0, np.divide(numerador, denominador)))
-        Q.clip(min=0)
+# Criando uma tabela que diz o peso da fase de cada vírus.
+fase_pesos = {
+    "Phase I": 0.25,
+    "Phase II": 0.5,
+    "Phase III": 0.75,
+    "Phase IV": 1.0
+}
 
-        perda = 0
-        for fase in mascaras.keys():
-            perda += 0.5 * alfas[fase] * LA.norm(np.multiply(mascaras[fase], (Y - np.dot(P, Q))), 'fro')**2
-        
-        J.append(perda)
+# Olhando cada linha do arquivo e verificando se a droga está na Fase I, II, III ou IV.
+def determinar_fase(linha):
+    for fase in ['Phase IV', 'Phase III', 'Phase II', 'Phase I']:
+        if linha.get(fase, '') == "*":
+            return fase_pesos[fase]
+        # Se a célula dessa fase tiver um * significa que a droga está nessa fase e ele retorna o peso
+        # correspondente da biblioteca, ou zero se não se encontrar em alguma fase.
+    return 0
 
-        dp = np.amax(np.abs(P - P0)) / (sqrt_eps + np.amax(np.abs(P0)))
-        dq = np.amax(np.abs(Q - Q0)) / (sqrt_eps + np.amax(np.abs(Q0)))
-        delta = np.maximum(dp, dq)
-      
-        if iteracao > 1 and delta <= tolx:
-            print(f'Convergido na iteração {iteracao} com delta {delta}')
-            break
+# Abaixo está sendo nova criada a coluna chamada "Fase" no nosso arquivo de dados com o valor da fase mais avançada.
+df["Fase"] = df.apply(determinar_fase)
 
-        P0 = P
-        Q0 = np.divide(Q, np.matlib.tile(np.array([np.sqrt(np.sum(np.power(Q0, 2), 1))]).transpose(), (1, n_virus)))
+# Para garantir que não temos linhas repetidas, como há no arquivo principal, agrupamos as drogas e vírus repetidos
+# através do groupby, o .agg está mantendo a fase mais alta caso haja a mesma droga em estágios diferentes.
+# Ja o reset.index está resetando as colunas para seus devídos índices (0, 1, 2, 3, 4...).
+df_grouped = df.groupby(['Drug', 'Virus']).agg({'Fase': 'max'}).reset_index()
 
-    return [P, Q, J]
+# Aqui abaixo há a criação de duas listas, de todas as drogas e vírus que serão usadas na criação da matriz Y
+drogas = df_grouped['Drug']
+virus = df_grouped['Virus']
 
-# Carregamento e preparação dos dados
-caminho_arquivo = 'caminho/para/DrugVirus.csv'  # Substitua pelo caminho correto do arquivo CSV
-dados = pd.read_csv(caminho_arquivo, encoding='latin1')
+# Agora estamos criando uma matriz de zeros
+# Essa matriz tem uma linha para cada droga e uma coluna para cada vírus
+Y = np.zeros((len(drogas), len(virus)))
 
-fases = ['Fase I', 'Fase II', 'Fase III']
-Y = dados.pivot_table(index='Medicamento', columns='Vírus', aggfunc='size', fill_value=0)
+# Agora preenchendo a matriz com os valores das fases
+for i, linha in df_grouped.iterrows():
+    # Encontrar a posição da droga e do vírus na lista, usamos linha em vez do df por ela ja ser retornada pelo iterrows
+    # assim, não acessamos toda a coluna mas a linha, cortando caminho
+    droga_idx = np.where(drogas == linha['Drug'])[0][0]
+    virus_idx = np.where(virus == linha['Virus'])[0][0]
+    # Agora pegando o valor da fase (que já foi calculado antes) e colocar na matriz
+    fase = linha["Fase"]
+    Y[droga_idx, virus_idx] = fase  # Preenche a célula correta da matriz com o valor da fase
 
-mascaras = {fase: (dados.pivot_table(index='Medicamento', columns='Vírus', values=fase, aggfunc=lambda x: 1 if x.notna().any() else 0, fill_value=0) > 0).astype(int) for fase in fases}
-alfas = {fase: 1.0 / (idx + 1) for idx, fase in enumerate(fases)}
+# Transformando a matriz em um df para facilitar a leitura
+Y_df = pd.DataFrame(Y, index=drogas, columns=virus)
 
-# Parâmetros do algoritmo de decomposição
-k = 10  # Número de fatores latentes
+# Passo 10: Exibir a matriz de associações (drogas e vírus) ponderada pelas fases de desenvolvimento
+print("Matriz de Associação entre Drogas e Vírus (ponderada pelas fases):")
+print(Y_df)
 
-# Execução do algoritmo de decomposição
-P, Q, J = AlgoritmoDecomposicao(Y.values, k, alfas, mascaras)
-
-# Exibição dos resultados
-print("Matriz P:", P)
-print("Matriz Q:", Q)
-print("Último valor da função de custo:", J[-1])
+# Se quiser salvar a matriz em um arquivo CSV (opcional)
+Y_df.to_csv("Matriz_Associacao_Ponderada.csv")
 
